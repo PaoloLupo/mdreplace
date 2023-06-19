@@ -1,5 +1,10 @@
-set shell := ["powershell.exe", "-c"]
-run: 
-  @echo "run py"
-  . .venv/Scripts/python ./testpy/test.py
+run:
+  ./venv/bin/python ./testpy/test.py
+venv:
+  [ -d venv ] || python -m venv venv
+activate: venv
+  source ./venv/bin/activate
+
+  
+  
   

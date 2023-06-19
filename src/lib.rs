@@ -1,3 +1,5 @@
+pub mod parser;
+use crate::parser::SyntaxKind;
 use ecow::EcoString;
 use pyo3::prelude::*;
 use std::fs::File;
@@ -11,28 +13,28 @@ fn open_file(path: &str) -> Result<String> {
     Ok(contents)
 }
 
-enum SyntaxKind {
-    MarkdownText,
-    DoubleCurlyBraces,
-}
-
 /// Divide el texto en tokens
+#[derive(Clone)]
 struct Lexer<'s> {
     s: Scanner<'s>,
     mode: LexMode,
-    error: Option<(EcoString, ErrorPos)>,
+    newline: bool,
+    error: Option<(EcoString)>,
 }
 
+#[derive(Clone, Copy)]
 enum LexMode {
-    Markdown,
-    Variables,
+    Markdown, // texto
+    Code,     // {{ }}
+    Keywords, // {% %}
 }
 
 impl<'s> Lexer<'s> {
-    fn new(s: &'s str, mode: LexMode) -> Self {
+    fn new(text: &'s str, mode: LexMode) -> Self {
         Self {
-            s: Scanner::new(s),
+            s: Scanner::new(text),
             mode,
+            newline: false,
             error: None,
         }
     }
@@ -47,13 +49,116 @@ impl<'s> Lexer<'s> {
         self.mode = mode;
     }
 
-    fn next(&mut self) -> Option<(SyntaxKind, &'s str)> {
-        let (kind, text) = self.s.next()?;
-        let kind = match kind {
-            unscanny::SyntaxKind::MarkdownText => SyntaxKind::MarkdownText,
-            unscanny::SyntaxKind::DoubleCurlyBraces => SyntaxKind::DoubleCurlyBraces,
-        };
-        Some((kind, text))
+    fn keywords(&self, start: usize, c: char) -> SyntaxKind {
+        todo!()
+    }
+}
+
+impl Lexer<'_> {
+    fn next(&mut self) -> SyntaxKind {
+        self.newline = false;
+        self.error = None;
+        let start = self.s.cursor();
+        match self.s.eat() {
+            Some(c) => match self.mode {
+                LexMode::Markdown => self.markdown(),
+                LexMode::Code => self.code(start, c),
+                LexMode::Keywords => self.keywords(start, c),
+            },
+
+            None => SyntaxKind::EOF,
+        }
+    }
+}
+
+impl Lexer<'_> {
+    fn markdown(&mut self) -> SyntaxKind {
+        macro_rules! table {
+            ($(|$c:literal)*) => {
+                static TABLE: [bool; 128] = {
+                    let mut table = [false; 128];
+                    $(table[$c as usize] = true;)*
+                    table
+                };
+            }
+        }
+
+        table! {
+            |'{' | '%' | '\n'
+        }
+        // match
+        loop {
+            self.s.eat_until(|c: char| {
+                TABLE
+                    .get(c as usize)
+                    .copied()
+                    .unwrap_or_else(|| c.is_whitespace())
+            });
+
+            let mut s = self.s;
+
+            match s.eat() {
+                Some(' ') if s.at(char::is_alphanumeric) => {}
+                Some('{') if !s.at('{') => {}
+                _ => break,
+            }
+
+            self.s = s;
+        }
+        self.mode = LexMode::Code;
+
+        SyntaxKind::MarkdownText
+    }
+
+    fn code(&mut self, start: usize, c: char) -> SyntaxKind {
+        match c {
+            '{' => {
+                if self.s.eat_if('{') {
+                    self.s.eat_while(|c| c != '}' && c != '\n');
+                    if self.s.eat_if('}') {
+                        SyntaxKind::DoubleCurlyBraces
+                    } else {
+                        self.error = Some("expected '}}'".into());
+                        SyntaxKind::Variables
+                    }
+                } else {
+                    self.s.eat_while(|c| c != '{' && c != '\n');
+                    if self.s.eat_if('{') {
+                        SyntaxKind::DoubleCurlyBraces
+                    } else {
+                        self.error = Some("expected '{{'".into());
+                        SyntaxKind::Variables
+                    }
+                }
+            }
+            '%' => {
+                if self.s.eat_if('%') {
+                    self.s.eat_while(|c| c != '%' && c != '\n');
+                    if self.s.eat_if('%') {
+                        SyntaxKind::DoubleCurlyBraces
+                    } else {
+                        self.error = Some("expected '%%'".into());
+                        SyntaxKind::Variables
+                    }
+                } else {
+                    self.s.eat_while(|c| c != '%' && c != '\n');
+                    if self.s.eat_if('%') {
+                        SyntaxKind::DoubleCurlyBraces
+                    } else {
+                        self.error = Some("expected '%%'".into());
+                        SyntaxKind::Variables
+                    }
+                }
+            }
+            '\n' => {
+                self.newline = true;
+                SyntaxKind::MarkdownText
+            }
+            _ => {
+                self.s.eat_while(|c| c != '{' && c != '%' && c != '\n');
+                SyntaxKind::MarkdownText
+            }
+        }
     }
 }
 
@@ -74,4 +179,30 @@ fn mdreplace(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(sum_as_string, m)?)?;
     m.add_function(wrap_pyfunction!(open_file_as_string, m)?)?;
     Ok(())
+}
+
+/// Divide el texto en tokens
+
+fn lex(text: &str) -> Vec<SyntaxKind> {
+    let mut lexer = Lexer::new(text, LexMode::Markdown);
+    let mut tokens = Vec::new();
+    loop {
+        let kind = lexer.next();
+        tokens.push(kind);
+        if kind == SyntaxKind::EOF {
+            break;
+        }
+    }
+    tokens
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn test_lexer() {
+        let text = open_file("/home/paolo/dev/rust/mdreplace/mdtest/01.md").unwrap();
+        let tokens = lex(&text);
+        println!("{:?}", tokens);
+    }
 }
